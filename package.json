@@ -1,0 +1,51 @@
+{
+	"name": "@ocodista/pi-token-bloat",
+	"version": "0.1.0",
+	"description": "Pi extension that shows startup token footprint by resource.",
+	"type": "module",
+	"license": "MIT",
+	"author": "ocodista",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ocodista/pi-token-bloat.git"
+	},
+	"homepage": "https://github.com/ocodista/pi-token-bloat#readme",
+	"bugs": {
+		"url": "https://github.com/ocodista/pi-token-bloat/issues"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"token-usage",
+		"tui"
+	],
+	"files": [
+		"index.ts",
+		"README.md",
+		"LICENSE",
+		"assets/token-bloat-demo.gif"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		],
+		"image": "https://raw.githubusercontent.com/ocodista/pi-token-bloat/main/assets/token-bloat-demo.gif"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit --skipLibCheck --moduleResolution node --module esnext --target es2022 index.ts",
+		"pack:dry-run": "npm pack --dry-run"
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-coding-agent": "*",
+		"@mariozechner/pi-tui": "*"
+	},
+	"devDependencies": {
+		"@mariozechner/pi-coding-agent": "^0.70.2",
+		"@mariozechner/pi-tui": "^0.70.2",
+		"@types/node": "^24.3.0",
+		"typescript": "^5.7.3"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
