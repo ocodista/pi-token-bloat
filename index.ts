@@ -1,44 +1,54 @@
 import { DefaultPackageManager, SettingsManager, getAgentDir, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
-import { Container, Text, matchesKey, truncateToWidth, visibleWidth, type Component, type TUI } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, type Component, type TUI } from "@mariozechner/pi-tui";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 
 type BloatSectionName = "Skills" | "Prompts" | "Extensions";
+type BloatChartName = "All" | BloatSectionName;
 
-interface BloatItem {
+type BloatItem = {
 	section: BloatSectionName;
 	label: string;
 	path: string;
-	chars: number;
 	tokens: number;
-}
+};
 
-interface BloatSection {
+type BloatSection = {
 	name: BloatSectionName;
-	files: number;
-	chars: number;
 	tokens: number;
 	items: BloatItem[];
-}
+};
 
-interface TokenBloatReport {
+type BloatChart = {
+	name: BloatChartName;
+	tokens: number;
+	items: BloatItem[];
+};
+
+type TokenBloatReport = {
 	sections: BloatSection[];
 	totalFiles: number;
-	totalChars: number;
 	totalTokens: number;
-}
+};
 
-interface TokenBloatConfig {
+type TokenBloatConfig = {
 	showSummaryOnOnboarding: boolean;
-}
+};
+
+type CustomUiContext = {
+	ui: {
+		custom: <T>(factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component, options?: unknown) => Promise<T>;
+	};
+};
 
 const TOKEN_DIVISOR = 4;
-const CONFIG_FILE_NAME = "token-bloat.json";
 const SUMMARY_WIDGET_KEY = "token-bloat-summary";
 const SUMMARY_VISIBLE_MS = 10_000;
-const DEFAULT_CONFIG: TokenBloatConfig = {
-	showSummaryOnOnboarding: true,
-};
+const CONFIG_FILE_NAME = "token-bloat.json";
+const DEFAULT_CONFIG: TokenBloatConfig = { showSummaryOnOnboarding: true };
+const BAR_MAX_WIDTH = 14;
+const TOKEN_WIDTH = 10;
+const MAX_VISIBLE_ITEMS = 12;
 
 function tokenCount(chars: number): number {
 	return chars / TOKEN_DIVISOR;
@@ -50,11 +60,9 @@ function formatNumber(value: number): string {
 	}).format(value);
 }
 
-function readCharCount(filePath: string): number {
+function readTokenCount(filePath: string): number {
 	try {
-		if (!existsSync(filePath)) return 0;
-		if (!statSync(filePath).isFile()) return 0;
-		return readFileSync(filePath, "utf-8").length;
+		return existsSync(filePath) && statSync(filePath).isFile() ? tokenCount(readFileSync(filePath, "utf-8").length) : 0;
 	} catch {
 		return 0;
 	}
@@ -87,66 +95,38 @@ function writeTokenBloatConfig(config: TokenBloatConfig): void {
 	writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
 }
 
-function uniquePaths(paths: string[]): string[] {
-	return Array.from(new Set(paths)).sort((a, b) => a.localeCompare(b));
-}
-
-function expandSkillPath(resourcePath: string): string[] {
+function expandResource(sectionName: BloatSectionName, resourcePath: string): string[] {
 	try {
 		if (!statSync(resourcePath).isDirectory()) return [resourcePath];
-		const skillPath = join(resourcePath, "SKILL.md");
-		return existsSync(skillPath) ? [skillPath] : [];
-	} catch {
-		return [resourcePath];
-	}
-}
-
-function expandPromptPath(resourcePath: string): string[] {
-	try {
-		if (!statSync(resourcePath).isDirectory()) return [resourcePath];
-		return readdirSync(resourcePath)
-			.filter((entry) => entry.endsWith(".md"))
-			.map((entry) => join(resourcePath, entry));
-	} catch {
-		return [resourcePath];
-	}
-}
-
-function expandExtensionPath(resourcePath: string): string[] {
-	try {
-		if (!statSync(resourcePath).isDirectory()) return [resourcePath];
-		const indexTs = join(resourcePath, "index.ts");
-		const indexJs = join(resourcePath, "index.js");
-		if (existsSync(indexTs)) return [indexTs];
-		if (existsSync(indexJs)) return [indexJs];
-		return [];
+		if (sectionName === "Skills") {
+			const skillPath = join(resourcePath, "SKILL.md");
+			return existsSync(skillPath) ? [skillPath] : [];
+		}
+		if (sectionName === "Prompts") return readdirSync(resourcePath).filter((entry) => entry.endsWith(".md")).map((entry) => join(resourcePath, entry));
+		const indexPath = ["index.ts", "index.js"].map((entry) => join(resourcePath, entry)).find(existsSync);
+		return indexPath ? [indexPath] : [];
 	} catch {
 		return [resourcePath];
 	}
 }
 
 function labelForPath(sectionName: BloatSectionName, filePath: string): string {
-	if (sectionName === "Skills") return basename(filePath) === "SKILL.md" ? basename(dirname(filePath)) : basename(filePath, extname(filePath));
+	const fileName = basename(filePath);
+	if (sectionName === "Skills") return fileName === "SKILL.md" ? basename(dirname(filePath)) : basename(filePath, extname(filePath));
 	if (sectionName === "Prompts") return `/${basename(filePath, extname(filePath))}`;
-	if (basename(filePath) === "index.ts" || basename(filePath) === "index.js") return basename(dirname(filePath));
-	return basename(filePath, extname(filePath));
+	return fileName === "index.ts" || fileName === "index.js" ? basename(dirname(filePath)) : basename(filePath, extname(filePath));
+}
+
+function sumTokens(items: BloatItem[]): number {
+	return items.reduce((sum, item) => sum + item.tokens, 0);
 }
 
 function buildSection(name: BloatSectionName, paths: string[]): BloatSection {
-	const items = uniquePaths(paths)
-		.map((filePath) => {
-			const chars = readCharCount(filePath);
-			return {
-				section: name,
-				label: labelForPath(name, filePath),
-				path: filePath,
-				chars,
-				tokens: tokenCount(chars),
-			};
-		})
+	const items = Array.from(new Set(paths))
+		.sort((a, b) => a.localeCompare(b))
+		.map((path) => ({ section: name, label: labelForPath(name, path), path, tokens: readTokenCount(path) }))
 		.sort((a, b) => b.tokens - a.tokens || a.label.localeCompare(b.label));
-	const chars = items.reduce((sum, item) => sum + item.chars, 0);
-	return { name, files: items.length, chars, tokens: tokenCount(chars), items };
+	return { name, tokens: sumTokens(items), items };
 }
 
 async function collectTokenBloat(cwd: string): Promise<TokenBloatReport> {
@@ -154,142 +134,39 @@ async function collectTokenBloat(cwd: string): Promise<TokenBloatReport> {
 	const settingsManager = SettingsManager.create(cwd, agentDir);
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
 	const paths = await packageManager.resolve();
-	const enabledPaths = (resources: typeof paths.skills): string[] => resources.filter((resource) => resource.enabled).map((resource) => resource.path);
-	const sections = [
-		buildSection("Skills", enabledPaths(paths.skills).flatMap(expandSkillPath)),
-		buildSection("Prompts", enabledPaths(paths.prompts).flatMap(expandPromptPath)),
-		buildSection("Extensions", enabledPaths(paths.extensions).flatMap(expandExtensionPath)),
+	const enabled = (resources: { enabled: boolean; path: string }[]): string[] => resources.filter((resource) => resource.enabled).map((resource) => resource.path);
+	const sectionResources: [BloatSectionName, { enabled: boolean; path: string }[]][] = [
+		["Skills", paths.skills],
+		["Prompts", paths.prompts],
+		["Extensions", paths.extensions],
 	];
-	const totalFiles = sections.reduce((sum, section) => sum + section.files, 0);
-	const totalChars = sections.reduce((sum, section) => sum + section.chars, 0);
-	return { sections, totalFiles, totalChars, totalTokens: tokenCount(totalChars) };
+	const sections = sectionResources.map(([name, resources]) => buildSection(name, enabled(resources).flatMap((path) => expandResource(name, path))));
+	const totalFiles = sections.reduce((sum, section) => sum + section.items.length, 0);
+	return { sections, totalFiles, totalTokens: sections.reduce((sum, section) => sum + section.tokens, 0) };
 }
 
 function renderTokenBloat(report: TokenBloatReport, theme: Theme): string[] {
 	const muted = (text: string) => theme.fg("dim", text);
-	const sectionLine = (section: BloatSection): string =>
-		`  ${theme.fg("accent", section.name)} ${muted(`${formatNumber(section.files)} files, ${formatNumber(section.tokens)} tokens`)}`;
 	return [
 		theme.fg("mdHeading", "[TokenBloat]"),
-		...report.sections.map(sectionLine),
+		...report.sections.map((section) => `  ${theme.fg("accent", section.name)} ${muted(`${formatNumber(section.items.length)} files, ${formatNumber(section.tokens)} tokens`)}`),
 		muted(`  Total ${formatNumber(report.totalFiles)} files, ${formatNumber(report.totalTokens)} tokens`),
 	];
 }
 
-
-type BloatChartName = "All" | BloatSectionName;
-type BloatChartKind = "all" | "section";
-
-type CustomUiContext = {
-	ui: {
-		custom: <T>(factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component, options?: unknown) => Promise<T>;
-	};
-};
-
-interface BloatChart {
-	name: BloatChartName;
-	kind: BloatChartKind;
-	files: number;
-	chars: number;
-	tokens: number;
-	items: BloatItem[];
-}
-
-function buildAllChart(sections: BloatSection[]): BloatChart {
-	const items = sections.flatMap((section) => section.items).sort((a, b) => b.tokens - a.tokens || a.section.localeCompare(b.section) || a.label.localeCompare(b.label));
-	const chars = items.reduce((sum, item) => sum + item.chars, 0);
-	return { name: "All", kind: "all", files: items.length, chars, tokens: chars / 4, items };
-}
-
-function buildSectionChart(section: BloatSection): BloatChart {
-	return {
-		name: section.name,
-		kind: "section",
-		files: section.files,
-		chars: section.chars,
-		tokens: section.tokens,
-		items: section.items,
-	};
-}
-
 function buildCharts(sections: BloatSection[]): BloatChart[] {
-	return [buildAllChart(sections), ...sections.map(buildSectionChart)];
+	const allItems = sections.flatMap((section) => section.items).sort((a, b) => b.tokens - a.tokens || a.section.localeCompare(b.section) || a.label.localeCompare(b.label));
+	return [{ name: "All", tokens: sumTokens(allItems), items: allItems }, ...sections];
 }
 
 function chartItemLabel(chart: BloatChart, item: BloatItem): string {
-	if (chart.kind === "all") return `${item.section} · ${item.label}`;
-	return item.label;
-}
-
-class BarList implements Component {
-	private selectedIndex = 0;
-	private readonly tokenWidth = 10;
-	private readonly barMaxWidth = 14;
-
-	constructor(
-		private readonly items: BloatItem[],
-		private readonly chartMaxTokens: number,
-		private readonly theme: Theme,
-		private readonly maxVisible: number,
-		private readonly itemLabel: (item: BloatItem) => string,
-		private readonly onSelectItem: () => void,
-		private readonly onCancel: () => void,
-		private readonly onChange: (item: BloatItem) => void,
-	) {}
-
-	handleInput(data: string): void {
-		if (this.items.length === 0) {
-			if (matchesKey(data, "enter")) this.onSelectItem();
-			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) this.onCancel();
-			return;
-		}
-
-		if (matchesKey(data, "up") || data === "k") {
-			this.selectedIndex = this.selectedIndex === 0 ? this.items.length - 1 : this.selectedIndex - 1;
-			this.onChange(this.items[this.selectedIndex]!);
-			return;
-		}
-		if (matchesKey(data, "down") || data === "j") {
-			this.selectedIndex = this.selectedIndex === this.items.length - 1 ? 0 : this.selectedIndex + 1;
-			this.onChange(this.items[this.selectedIndex]!);
-			return;
-		}
-		if (matchesKey(data, "enter")) {
-			this.onSelectItem();
-			return;
-		}
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) this.onCancel();
-	}
-
-	render(width: number): string[] {
-		if (this.items.length === 0) return [this.theme.fg("dim", "  No items")];
-		const startIndex = Math.max(0, Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.items.length - this.maxVisible));
-		const endIndex = Math.min(startIndex + this.maxVisible, this.items.length);
-		const lines: string[] = [];
-
-		for (let i = startIndex; i < endIndex; i++) {
-			const item = this.items[i]!;
-			const prefix = i === this.selectedIndex ? this.theme.fg("accent", "→ ") : "  ";
-			const tokenStr = this.theme.fg("success", formatNumber(item.tokens).padStart(this.tokenWidth));
-			const barLength = Math.max(0, Math.ceil((item.tokens / this.chartMaxTokens) * this.barMaxWidth));
-			const barStr = this.theme.fg("accent", "█".repeat(barLength)) + this.theme.fg("dim", "░".repeat(this.barMaxWidth - barLength));
-			const prefixPart = prefix + tokenStr + " " + barStr + "  ";
-			const remaining = Math.max(0, width - (2 + this.tokenWidth + 1 + this.barMaxWidth + 2));
-			lines.push(prefixPart + truncateToWidth(this.theme.fg("text", this.itemLabel(item)), remaining));
-		}
-
-		if (this.items.length > this.maxVisible) lines.push(this.theme.fg("dim", truncateToWidth(`  (${this.selectedIndex + 1}/${this.items.length})`, width, "")));
-		return lines;
-	}
-
-	invalidate(): void {}
+	return chart.name === "All" ? `${item.section} · ${item.label}` : item.label;
 }
 
 class TokenBloatModal implements Component {
 	private readonly charts: BloatChart[];
 	private selectedChartIndex = 0;
-	private list: BarList;
-	private selectedItem: BloatItem | undefined;
+	private selectedItemIndex = 0;
 
 	constructor(
 		private readonly tui: TUI,
@@ -298,87 +175,61 @@ class TokenBloatModal implements Component {
 		private readonly done: () => void,
 	) {
 		this.charts = buildCharts(report.sections);
-		this.list = this.createList(this.currentChart());
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, "tab") || matchesKey(data, "right")) {
-			this.selectChart((this.selectedChartIndex + 1) % this.charts.length);
-			this.tui.requestRender();
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "enter")) {
+			this.done();
 			return;
 		}
-		if (matchesKey(data, "left")) {
-			this.selectChart((this.selectedChartIndex + this.charts.length - 1) % this.charts.length);
-			this.tui.requestRender();
-			return;
-		}
-		if (/^[1-9]$/.test(data)) {
-			this.selectChart(Number(data) - 1);
-			this.tui.requestRender();
-			return;
-		}
-		this.list.handleInput(data);
+		if (matchesKey(data, "tab") || matchesKey(data, "right")) this.selectChart(this.selectedChartIndex + 1);
+		else if (matchesKey(data, "left")) this.selectChart(this.selectedChartIndex + this.charts.length - 1);
+		else if (/^[1-9]$/.test(data) && Number(data) <= this.charts.length) this.selectChart(Number(data) - 1);
+		else if (matchesKey(data, "up") || data === "k") this.selectItem(-1);
+		else if (matchesKey(data, "down") || data === "j") this.selectItem(1);
 		this.tui.requestRender();
 	}
 
 	render(width: number): string[] {
 		const chart = this.currentChart();
 		const innerWidth = Math.max(1, width - 4);
-		const container = new Container();
-		container.addChild(new Text(this.renderTitle(), 1, 0));
-		container.addChild(new Text(this.renderSummary(), 1, 0));
-		container.addChild(new Text(this.renderTabs(), 1, 0));
-		container.addChild(new Text(this.renderChartMeta(chart), 1, 0));
-		container.addChild(new Text(`${this.theme.fg("muted", "Tokens".padStart(10))}  ${this.theme.fg("muted", "─".repeat(14))}  ${this.theme.fg("muted", "Resource")}`, 1, 0));
-		container.addChild(this.list);
-		container.addChild(new Text(this.renderSelectionDetail(chart), 1, 0));
-		container.addChild(new Text(this.theme.fg("dim", `↑↓ navigate · ←/→ or Tab switch chart · 1-${this.charts.length} jump · Enter/Esc close`), 1, 0));
-		return frame(container.render(innerWidth), innerWidth, this.theme);
+		return frame(
+			[
+				`${this.theme.fg("accent", this.theme.bold("TokenBloat"))} ${this.theme.fg("dim", "startup token footprint")}`,
+				this.theme.fg("dim", `Total ${formatNumber(this.report.totalTokens)} tokens across ${formatNumber(this.report.totalFiles)} resources`),
+				this.renderTabs(),
+				this.renderChartMeta(chart),
+				`${this.theme.fg("muted", "Tokens".padStart(TOKEN_WIDTH))}  ${this.theme.fg("muted", "─".repeat(BAR_MAX_WIDTH))}  ${this.theme.fg("muted", "Resource")}`,
+				...this.renderItems(chart, innerWidth),
+				this.renderSelectionDetail(chart),
+				this.theme.fg("dim", `↑↓ navigate · ←/→ or Tab switch chart · 1-${this.charts.length} jump · Enter/Esc close`),
+			],
+			innerWidth,
+			this.theme,
+		);
 	}
 
-	invalidate(): void {
-		this.list.invalidate();
-	}
+	invalidate(): void {}
 
 	private currentChart(): BloatChart {
 		return this.charts[this.selectedChartIndex] ?? this.charts[0]!;
 	}
 
 	private selectChart(index: number): void {
-		if (index < 0 || index >= this.charts.length) return;
-		this.selectedChartIndex = index;
-		this.list = this.createList(this.currentChart());
+		this.selectedChartIndex = ((index % this.charts.length) + this.charts.length) % this.charts.length;
+		this.selectedItemIndex = 0;
 	}
 
-	private createList(chart: BloatChart): BarList {
-		const list = new BarList(
-			chart.items,
-			chart.items[0]?.tokens ?? 1,
-			this.theme,
-			Math.min(Math.max(chart.items.length, 1), 12),
-			(item) => chartItemLabel(chart, item),
-			() => this.done(),
-			() => this.done(),
-			(item) => {
-				this.selectedItem = item;
-			},
-		);
-		this.selectedItem = chart.items[0];
-		return list;
-	}
-
-	private renderTitle(): string {
-		return `${this.theme.fg("accent", this.theme.bold("TokenBloat"))} ${this.theme.fg("dim", "startup token footprint")}`;
-	}
-
-	private renderSummary(): string {
-		return this.theme.fg("dim", `Total ${formatNumber(this.report.totalTokens)} tokens across ${formatNumber(this.report.totalFiles)} resources`);
+	private selectItem(direction: -1 | 1): void {
+		const { items } = this.currentChart();
+		if (items.length === 0) return;
+		this.selectedItemIndex = (this.selectedItemIndex + direction + items.length) % items.length;
 	}
 
 	private renderTabs(): string {
 		return this.charts
 			.map((chart, index) => {
-				const tab = `${index + 1}. ${chart.name} (${formatNumber(chart.files)}) ${formatNumber(chart.tokens)}`;
+				const tab = `${index + 1}. ${chart.name} (${formatNumber(chart.items.length)}) ${formatNumber(chart.tokens)}`;
 				return index === this.selectedChartIndex ? this.theme.bg("selectedBg", this.theme.fg("accent", ` ${this.theme.bold(tab)} `)) : this.theme.fg("dim", ` ${tab} `);
 			})
 			.join(" ");
@@ -386,13 +237,30 @@ class TokenBloatModal implements Component {
 
 	private renderChartMeta(chart: BloatChart): string {
 		const percent = this.report.totalTokens > 0 ? (chart.tokens / this.report.totalTokens) * 100 : 0;
-		const labelHint = chart.kind === "all" ? "labels include resource group" : "resource labels";
-		return `${this.theme.fg("accent", chart.name)} ${this.theme.fg("dim", `${formatNumber(chart.files)} resources · ${formatNumber(chart.tokens)} tokens · ${formatNumber(percent)}% of total · sorted desc · ${labelHint}`)}`;
+		const labelHint = chart.name === "All" ? "labels include resource group" : "resource labels";
+		return `${this.theme.fg("accent", chart.name)} ${this.theme.fg("dim", `${formatNumber(chart.items.length)} resources · ${formatNumber(chart.tokens)} tokens · ${formatNumber(percent)}% of total · sorted desc · ${labelHint}`)}`;
+	}
+
+	private renderItems(chart: BloatChart, width: number): string[] {
+		if (chart.items.length === 0) return [this.theme.fg("dim", "  No items")];
+		const maxVisible = Math.min(Math.max(chart.items.length, 1), MAX_VISIBLE_ITEMS);
+		const start = Math.max(0, Math.min(this.selectedItemIndex - Math.floor(maxVisible / 2), chart.items.length - maxVisible));
+		const maxTokens = Math.max(chart.items[0]?.tokens ?? 1, 1);
+		const lines = chart.items.slice(start, start + maxVisible).map((item, offset) => {
+			const index = start + offset;
+			const prefix = index === this.selectedItemIndex ? this.theme.fg("accent", "→ ") : "  ";
+			const barLength = Math.ceil((item.tokens / maxTokens) * BAR_MAX_WIDTH);
+			const prefixPart = `${prefix}${this.theme.fg("success", formatNumber(item.tokens).padStart(TOKEN_WIDTH))} ${this.theme.fg("accent", "█".repeat(barLength))}${this.theme.fg("dim", "░".repeat(BAR_MAX_WIDTH - barLength))}  `;
+			return prefixPart + truncateToWidth(this.theme.fg("text", chartItemLabel(chart, item)), Math.max(0, width - (2 + TOKEN_WIDTH + 1 + BAR_MAX_WIDTH + 2)));
+		});
+		if (chart.items.length > maxVisible) lines.push(this.theme.fg("dim", truncateToWidth(`  (${this.selectedItemIndex + 1}/${chart.items.length})`, width, "")));
+		return lines;
 	}
 
 	private renderSelectionDetail(chart: BloatChart): string {
-		if (!this.selectedItem) return this.theme.fg("dim", "No resource selected");
-		return `${this.theme.fg("success", `${formatNumber(this.selectedItem.tokens)} tokens`)}  ${this.theme.fg("muted", chartItemLabel(chart, this.selectedItem))}  ${this.theme.fg("dim", this.selectedItem.path)}`;
+		const item = chart.items[this.selectedItemIndex];
+		if (!item) return this.theme.fg("dim", "No resource selected");
+		return `${this.theme.fg("success", `${formatNumber(item.tokens)} tokens`)}  ${this.theme.fg("muted", chartItemLabel(chart, item))}  ${this.theme.fg("dim", item.path)}`;
 	}
 }
 
@@ -422,7 +290,6 @@ class TokenBloatSettingsModal implements Component {
 	}
 
 	render(width: number): string[] {
-		const innerWidth = Math.max(1, width - 4);
 		const enabledText = this.showSummaryOnOnboarding ? this.theme.fg("success", "Enabled") : this.theme.fg("muted", "Disabled");
 		return frame(
 			[
@@ -434,7 +301,7 @@ class TokenBloatSettingsModal implements Component {
 				"",
 				this.theme.fg("dim", "←/→ or Space toggle · Enter save · Esc cancel"),
 			],
-			innerWidth,
+			Math.max(1, width - 4),
 			this.theme,
 		);
 	}
@@ -447,8 +314,7 @@ function frame(content: string[], innerWidth: number, theme: Theme): string[] {
 	const lines = [blue(`┌${"─".repeat(innerWidth)}┐`)];
 	for (const line of content) {
 		const truncated = truncateToWidth(line, innerWidth, "");
-		const spaces = " ".repeat(Math.max(0, innerWidth - visibleWidth(truncated)));
-		lines.push(blue("│ ") + truncated + spaces + blue(" │"));
+		lines.push(`${blue("│ ")}${truncated}${" ".repeat(Math.max(0, innerWidth - visibleWidth(truncated)))}${blue(" │")}`);
 	}
 	lines.push(blue(`└${"─".repeat(innerWidth)}┘`));
 	return lines;
@@ -457,24 +323,14 @@ function frame(content: string[], innerWidth: number, theme: Theme): string[] {
 async function showTokenBloatModal(ctx: CustomUiContext, report: TokenBloatReport): Promise<void> {
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => new TokenBloatModal(tui, report, theme, done), {
 		overlay: true,
-		overlayOptions: {
-			width: "90%",
-			minWidth: 70,
-			maxHeight: "80%",
-			anchor: "center",
-		},
+		overlayOptions: { width: "90%", minWidth: 70, maxHeight: "80%", anchor: "center" },
 	});
 }
 
 async function showTokenBloatSettingsModal(ctx: CustomUiContext, config: TokenBloatConfig): Promise<TokenBloatConfig | undefined> {
 	return ctx.ui.custom<TokenBloatConfig | undefined>((tui, theme, _keybindings, done) => new TokenBloatSettingsModal(tui, theme, config, done), {
 		overlay: true,
-		overlayOptions: {
-			width: "70%",
-			minWidth: 58,
-			maxHeight: "60%",
-			anchor: "center",
-		},
+		overlayOptions: { width: "70%", minWidth: 58, maxHeight: "60%", anchor: "center" },
 	});
 }
 
@@ -514,8 +370,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		clearSummary(ctx);
+		if (ctx.hasUI) clearSummary(ctx);
 	});
 
 	pi.registerCommand("token-bloat", {
@@ -525,8 +380,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/token-bloat requires interactive mode", "error");
 				return;
 			}
-			const report = cachedReport ?? (await loadReport(ctx.cwd));
-			await showTokenBloatModal(ctx, report);
+			await showTokenBloatModal(ctx, cachedReport ?? (await loadReport(ctx.cwd)));
 		},
 	});
 
@@ -537,8 +391,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/token-bloat:settings requires interactive mode", "error");
 				return;
 			}
-			const currentConfig = readTokenBloatConfig();
-			const nextConfig = await showTokenBloatSettingsModal(ctx, currentConfig);
+			const nextConfig = await showTokenBloatSettingsModal(ctx, readTokenBloatConfig());
 			if (!nextConfig) return;
 			writeTokenBloatConfig(nextConfig);
 			if (nextConfig.showSummaryOnOnboarding) showSummary(ctx, cachedReport ?? (await loadReport(ctx.cwd)));
