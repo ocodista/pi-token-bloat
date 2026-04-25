@@ -21,7 +21,6 @@
 	],
 	"files": [
 		"index.ts",
-		"ui.ts",
 		"README.md",
 		"LICENSE",
 		"assets/token-bloat-demo.gif"
@@ -33,7 +32,7 @@
 		"image": "https://raw.githubusercontent.com/ocodista/pi-token-bloat/main/assets/token-bloat-demo.gif"
 	},
 	"scripts": {
-		"typecheck": "tsc --noEmit --skipLibCheck --moduleResolution node --module esnext --target es2022 --allowImportingTsExtensions index.ts ui.ts",
+		"typecheck": "tsc --noEmit --skipLibCheck --moduleResolution node --module esnext --target es2022 index.ts",
 		"pack:dry-run": "npm pack --dry-run",
 		"prepublishOnly": "npm run typecheck"
 	},
