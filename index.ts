@@ -10,7 +10,7 @@ import {
 	type Theme,
 } from "@mariozechner/pi-coding-agent";
 import { Container, Text, matchesKey, truncateToWidth, visibleWidth, type Component, type TUI } from "@mariozechner/pi-tui";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 
 type BloatSectionName = "Skills" | "Prompts" | "Extensions";
@@ -40,6 +40,10 @@ interface TokenBloatReport {
 	totalTokens: number;
 }
 
+interface TokenBloatConfig {
+	showSummaryOnOnboarding: boolean;
+}
+
 interface BloatChart {
 	name: BloatChartName;
 	kind: BloatChartKind;
@@ -50,6 +54,11 @@ interface BloatChart {
 }
 
 const TOKEN_DIVISOR = 4;
+const CONFIG_FILE_NAME = "token-bloat.json";
+const DEFAULT_CONFIG: TokenBloatConfig = {
+	showSummaryOnOnboarding: true,
+};
+
 function tokenCount(chars: number): number {
 	return chars / TOKEN_DIVISOR;
 }
@@ -68,6 +77,33 @@ function readCharCount(filePath: string): number {
 	} catch {
 		return 0;
 	}
+}
+
+function configPath(): string {
+	return join(getAgentDir(), CONFIG_FILE_NAME);
+}
+
+function isConfigRecord(value: unknown): value is { showSummaryOnOnboarding?: unknown } {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readTokenBloatConfig(): TokenBloatConfig {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(configPath(), "utf-8"));
+		if (!isConfigRecord(parsed)) return DEFAULT_CONFIG;
+		return {
+			showSummaryOnOnboarding:
+				typeof parsed.showSummaryOnOnboarding === "boolean" ? parsed.showSummaryOnOnboarding : DEFAULT_CONFIG.showSummaryOnOnboarding,
+		};
+	} catch {
+		return DEFAULT_CONFIG;
+	}
+}
+
+function writeTokenBloatConfig(config: TokenBloatConfig): void {
+	const path = configPath();
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
 }
 
 function uniquePaths(paths: string[]): string[] {
@@ -474,6 +510,64 @@ class TokenBloatModal implements Component {
 	}
 }
 
+class TokenBloatSettingsModal implements Component {
+	private showSummaryOnOnboarding: boolean;
+
+	constructor(
+		private readonly tui: TUI,
+		private readonly theme: Theme,
+		initialConfig: TokenBloatConfig,
+		private readonly done: (result: TokenBloatConfig | undefined) => void,
+	) {
+		this.showSummaryOnOnboarding = initialConfig.showSummaryOnOnboarding;
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "left") || matchesKey(data, "right") || data === " ") {
+			this.showSummaryOnOnboarding = !this.showSummaryOnOnboarding;
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "enter")) {
+			this.done({ showSummaryOnOnboarding: this.showSummaryOnOnboarding });
+			return;
+		}
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			this.done(undefined);
+		}
+	}
+
+	render(width: number): string[] {
+		const innerWidth = Math.max(1, width - 4);
+		const blue = (text: string) => this.theme.fg("accent", text);
+		const enabledText = this.showSummaryOnOnboarding ? this.theme.fg("success", "Enabled") : this.theme.fg("muted", "Disabled");
+		const lines = [
+			`${this.theme.fg("accent", this.theme.bold("TokenBloat settings"))}`,
+			this.theme.fg("dim", "Configure how TokenBloat appears when Pi starts."),
+			"",
+			`${this.theme.fg("text", "Startup summary")}  ${enabledText}`,
+			this.theme.fg("dim", "Show the TokenBloat summary in the onboarding header."),
+			"",
+			this.theme.fg("dim", "←/→ or Space toggle · Enter save · Esc cancel"),
+		];
+		const top = blue(`┌${"─".repeat(innerWidth)}┐`);
+		const bottom = blue(`└${"─".repeat(innerWidth)}┘`);
+		const left = blue("│ ");
+		const right = blue(" │");
+		return [
+			top,
+			...lines.map((line) => {
+				const truncated = truncateToWidth(line, innerWidth, "");
+				const spaces = " ".repeat(Math.max(0, innerWidth - visibleWidth(truncated)));
+				return left + truncated + spaces + right;
+			}),
+			bottom,
+		];
+	}
+
+	invalidate(): void {}
+}
+
 async function showTokenBloatModal(ctx: { ui: { custom: <T>(factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component, options?: unknown) => Promise<T> } }, report: TokenBloatReport): Promise<void> {
 	await ctx.ui.custom<void>(
 		(tui, theme, _keybindings, done) => new TokenBloatModal(tui, report, theme, done),
@@ -489,19 +583,45 @@ async function showTokenBloatModal(ctx: { ui: { custom: <T>(factory: (tui: TUI, 
 	);
 }
 
+async function showTokenBloatSettingsModal(
+	ctx: { ui: { custom: <T>(factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component, options?: unknown) => Promise<T> } },
+	config: TokenBloatConfig,
+): Promise<TokenBloatConfig | undefined> {
+	return ctx.ui.custom<TokenBloatConfig | undefined>(
+		(tui, theme, _keybindings, done) => new TokenBloatSettingsModal(tui, theme, config, done),
+		{
+			overlay: true,
+			overlayOptions: {
+				width: "70%",
+				minWidth: 58,
+				maxHeight: "60%",
+				anchor: "center",
+			},
+		},
+	);
+}
+
 export default function (pi: ExtensionAPI) {
-	async function refreshTokenBloat(ctx: {
-		cwd: string;
-		ui: { setHeader: (factory: (_tui: TUI, theme: Theme) => Component) => void; getToolsExpanded: () => boolean; theme: Theme };
-	}): Promise<TokenBloatReport> {
+	async function refreshTokenBloat(
+		ctx: {
+			cwd: string;
+			ui: { setHeader: (factory: ((_tui: TUI, theme: Theme) => Component) | undefined) => void; getToolsExpanded: () => boolean; theme: Theme };
+		},
+		config: TokenBloatConfig,
+	): Promise<TokenBloatReport> {
 		const report = await collectTokenBloat(ctx.cwd);
-		ctx.ui.setHeader(createHeaderFactory(report, ctx.ui.getToolsExpanded));
+		ctx.ui.setHeader(config.showSummaryOnOnboarding ? createHeaderFactory(report, ctx.ui.getToolsExpanded) : undefined);
 		return report;
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		await refreshTokenBloat(ctx);
+		const config = readTokenBloatConfig();
+		if (!config.showSummaryOnOnboarding) {
+			ctx.ui.setHeader(undefined);
+			return;
+		}
+		await refreshTokenBloat(ctx, config);
 	});
 
 	pi.registerCommand("token-bloat", {
@@ -511,8 +631,29 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/token-bloat requires interactive mode", "error");
 				return;
 			}
-			const report = await refreshTokenBloat(ctx);
+			const config = readTokenBloatConfig();
+			const report = await refreshTokenBloat(ctx, config);
 			await showTokenBloatModal(ctx, report);
+		},
+	});
+
+	pi.registerCommand("token-bloat:settings", {
+		description: "Configure TokenBloat startup summary visibility",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("/token-bloat:settings requires interactive mode", "error");
+				return;
+			}
+			const currentConfig = readTokenBloatConfig();
+			const nextConfig = await showTokenBloatSettingsModal(ctx, currentConfig);
+			if (!nextConfig) return;
+			writeTokenBloatConfig(nextConfig);
+			if (nextConfig.showSummaryOnOnboarding) {
+				await refreshTokenBloat(ctx, nextConfig);
+			} else {
+				ctx.ui.setHeader(undefined);
+			}
+			ctx.ui.notify(`TokenBloat startup summary ${nextConfig.showSummaryOnOnboarding ? "enabled" : "disabled"}`, "info");
 		},
 	});
 }

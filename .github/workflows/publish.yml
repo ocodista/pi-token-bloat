@@ -1,0 +1,56 @@
+name: Publish
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    if: github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, 'chore(release):')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm install --no-package-lock
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Verify npm authentication
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Bump patch version
+        run: npm version patch --no-git-tag-version
+
+      - name: Commit version bump
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore(release): ${version} [skip ci]"
+          git tag "${version}"
+          git push origin HEAD:main --follow-tags
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

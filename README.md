@@ -44,6 +44,12 @@ Open the detailed view:
 /token-bloat
 ```
 
+Configure the startup summary:
+
+```text
+/token-bloat:settings
+```
+
 In the chart:
 
 - Use `↑` and `↓` to move.
