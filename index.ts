@@ -55,6 +55,8 @@ interface BloatChart {
 
 const TOKEN_DIVISOR = 4;
 const CONFIG_FILE_NAME = "token-bloat.json";
+const RELOAD_SUMMARY_WIDGET_KEY = "token-bloat-reload-summary";
+const RELOAD_SUMMARY_VISIBLE_MS = 10_000;
 const DEFAULT_CONFIG: TokenBloatConfig = {
 	showSummaryOnOnboarding: true,
 };
@@ -602,6 +604,23 @@ async function showTokenBloatSettingsModal(
 }
 
 export default function (pi: ExtensionAPI) {
+	let reloadSummaryTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function clearReloadSummary(ctx: { ui: { setWidget: (key: string, content: string[] | undefined, options?: unknown) => void } }): void {
+		if (reloadSummaryTimer) clearTimeout(reloadSummaryTimer);
+		reloadSummaryTimer = undefined;
+		ctx.ui.setWidget(RELOAD_SUMMARY_WIDGET_KEY, undefined);
+	}
+
+	function showReloadSummary(ctx: { ui: { setWidget: (key: string, content: string[] | undefined, options?: unknown) => void; theme: Theme } }, report: TokenBloatReport): void {
+		if (reloadSummaryTimer) clearTimeout(reloadSummaryTimer);
+		ctx.ui.setWidget(RELOAD_SUMMARY_WIDGET_KEY, renderTokenBloat(report, ctx.ui.theme), { placement: "aboveEditor" });
+		reloadSummaryTimer = setTimeout(() => {
+			ctx.ui.setWidget(RELOAD_SUMMARY_WIDGET_KEY, undefined);
+			reloadSummaryTimer = undefined;
+		}, RELOAD_SUMMARY_VISIBLE_MS);
+	}
+
 	async function refreshTokenBloat(
 		ctx: {
 			cwd: string;
@@ -614,14 +633,21 @@ export default function (pi: ExtensionAPI) {
 		return report;
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 		const config = readTokenBloatConfig();
 		if (!config.showSummaryOnOnboarding) {
 			ctx.ui.setHeader(undefined);
+			clearReloadSummary(ctx);
 			return;
 		}
-		await refreshTokenBloat(ctx, config);
+		const report = await refreshTokenBloat(ctx, config);
+		if (event.reason === "reload") showReloadSummary(ctx, report);
+	});
+
+	pi.on("session_shutdown", async (_event, ctx) => {
+		if (!ctx.hasUI) return;
+		clearReloadSummary(ctx);
 	});
 
 	pi.registerCommand("token-bloat", {

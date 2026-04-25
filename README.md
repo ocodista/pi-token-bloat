@@ -36,7 +36,7 @@ pi -e git:github.com/ocodista/pi-token-bloat
 
 ## Use
 
-Start Pi after installing the package. TokenBloat updates the startup header automatically.
+Start Pi after installing the package. TokenBloat updates the startup header automatically. After `/reload`, it briefly shows the summary above the editor.
 
 Open the detailed view:
 
