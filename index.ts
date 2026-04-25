@@ -1,21 +1,9 @@
-import {
-	DefaultPackageManager,
-	SettingsManager,
-	VERSION,
-	getAgentDir,
-	keyHint,
-	keyText,
-	rawKeyHint,
-	type ExtensionAPI,
-	type Theme,
-} from "@mariozechner/pi-coding-agent";
+import { DefaultPackageManager, SettingsManager, getAgentDir, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
 import { Container, Text, matchesKey, truncateToWidth, visibleWidth, type Component, type TUI } from "@mariozechner/pi-tui";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 
 type BloatSectionName = "Skills" | "Prompts" | "Extensions";
-type BloatChartName = "All" | BloatSectionName;
-type BloatChartKind = "all" | "section";
 
 interface BloatItem {
 	section: BloatSectionName;
@@ -44,19 +32,10 @@ interface TokenBloatConfig {
 	showSummaryOnOnboarding: boolean;
 }
 
-interface BloatChart {
-	name: BloatChartName;
-	kind: BloatChartKind;
-	files: number;
-	chars: number;
-	tokens: number;
-	items: BloatItem[];
-}
-
 const TOKEN_DIVISOR = 4;
 const CONFIG_FILE_NAME = "token-bloat.json";
-const RELOAD_SUMMARY_WIDGET_KEY = "token-bloat-reload-summary";
-const RELOAD_SUMMARY_VISIBLE_MS = 10_000;
+const SUMMARY_WIDGET_KEY = "token-bloat-summary";
+const SUMMARY_VISIBLE_MS = 10_000;
 const DEFAULT_CONFIG: TokenBloatConfig = {
 	showSummaryOnOnboarding: true,
 };
@@ -147,15 +126,9 @@ function expandExtensionPath(resourcePath: string): string[] {
 }
 
 function labelForPath(sectionName: BloatSectionName, filePath: string): string {
-	if (sectionName === "Skills") {
-		return basename(filePath) === "SKILL.md" ? basename(dirname(filePath)) : basename(filePath, extname(filePath));
-	}
-	if (sectionName === "Prompts") {
-		return `/${basename(filePath, extname(filePath))}`;
-	}
-	if (basename(filePath) === "index.ts" || basename(filePath) === "index.js") {
-		return basename(dirname(filePath));
-	}
+	if (sectionName === "Skills") return basename(filePath) === "SKILL.md" ? basename(dirname(filePath)) : basename(filePath, extname(filePath));
+	if (sectionName === "Prompts") return `/${basename(filePath, extname(filePath))}`;
+	if (basename(filePath) === "index.ts" || basename(filePath) === "index.js") return basename(dirname(filePath));
 	return basename(filePath, extname(filePath));
 }
 
@@ -173,13 +146,7 @@ function buildSection(name: BloatSectionName, paths: string[]): BloatSection {
 		})
 		.sort((a, b) => b.tokens - a.tokens || a.label.localeCompare(b.label));
 	const chars = items.reduce((sum, item) => sum + item.chars, 0);
-	return {
-		name,
-		files: items.length,
-		chars,
-		tokens: tokenCount(chars),
-		items,
-	};
+	return { name, files: items.length, chars, tokens: tokenCount(chars), items };
 }
 
 async function collectTokenBloat(cwd: string): Promise<TokenBloatReport> {
@@ -188,7 +155,6 @@ async function collectTokenBloat(cwd: string): Promise<TokenBloatReport> {
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
 	const paths = await packageManager.resolve();
 	const enabledPaths = (resources: typeof paths.skills): string[] => resources.filter((resource) => resource.enabled).map((resource) => resource.path);
-
 	const sections = [
 		buildSection("Skills", enabledPaths(paths.skills).flatMap(expandSkillPath)),
 		buildSection("Prompts", enabledPaths(paths.prompts).flatMap(expandPromptPath)),
@@ -196,25 +162,43 @@ async function collectTokenBloat(cwd: string): Promise<TokenBloatReport> {
 	];
 	const totalFiles = sections.reduce((sum, section) => sum + section.files, 0);
 	const totalChars = sections.reduce((sum, section) => sum + section.chars, 0);
-	return {
-		sections,
-		totalFiles,
-		totalChars,
-		totalTokens: tokenCount(totalChars),
+	return { sections, totalFiles, totalChars, totalTokens: tokenCount(totalChars) };
+}
+
+function renderTokenBloat(report: TokenBloatReport, theme: Theme): string[] {
+	const muted = (text: string) => theme.fg("dim", text);
+	const sectionLine = (section: BloatSection): string =>
+		`  ${theme.fg("accent", section.name)} ${muted(`${formatNumber(section.files)} files, ${formatNumber(section.tokens)} tokens`)}`;
+	return [
+		theme.fg("mdHeading", "[TokenBloat]"),
+		...report.sections.map(sectionLine),
+		muted(`  Total ${formatNumber(report.totalFiles)} files, ${formatNumber(report.totalTokens)} tokens`),
+	];
+}
+
+
+type BloatChartName = "All" | BloatSectionName;
+type BloatChartKind = "all" | "section";
+
+type CustomUiContext = {
+	ui: {
+		custom: <T>(factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component, options?: unknown) => Promise<T>;
 	};
+};
+
+interface BloatChart {
+	name: BloatChartName;
+	kind: BloatChartKind;
+	files: number;
+	chars: number;
+	tokens: number;
+	items: BloatItem[];
 }
 
 function buildAllChart(sections: BloatSection[]): BloatChart {
 	const items = sections.flatMap((section) => section.items).sort((a, b) => b.tokens - a.tokens || a.section.localeCompare(b.section) || a.label.localeCompare(b.label));
 	const chars = items.reduce((sum, item) => sum + item.chars, 0);
-	return {
-		name: "All",
-		kind: "all",
-		files: items.length,
-		chars,
-		tokens: tokenCount(chars),
-		items,
-	};
+	return { name: "All", kind: "all", files: items.length, chars, tokens: chars / 4, items };
 }
 
 function buildSectionChart(section: BloatSection): BloatChart {
@@ -235,67 +219,6 @@ function buildCharts(sections: BloatSection[]): BloatChart[] {
 function chartItemLabel(chart: BloatChart, item: BloatItem): string {
 	if (chart.kind === "all") return `${item.section} · ${item.label}`;
 	return item.label;
-}
-
-function renderTokenBloat(report: TokenBloatReport, theme: Theme): string[] {
-	const muted = (text: string) => theme.fg("dim", text);
-	const sectionLine = (section: BloatSection): string =>
-		`  ${theme.fg("accent", section.name)} ${muted(`${formatNumber(section.files)} files, ${formatNumber(section.tokens)} tokens`)}`;
-
-	return [
-		theme.fg("mdHeading", "[TokenBloat]"),
-		...report.sections.map(sectionLine),
-		muted(`  Total ${formatNumber(report.totalFiles)} files, ${formatNumber(report.totalTokens)} tokens`),
-	];
-}
-
-function renderInstructionBlock(theme: Theme, expanded: boolean): string[] {
-	const compactInstructions = [
-		keyHint("app.interrupt", "interrupt"),
-		rawKeyHint(`${keyText("app.clear")}/${keyText("app.exit")}`, "clear/exit"),
-		rawKeyHint("/", "commands"),
-		rawKeyHint("!", "bash"),
-		keyHint("app.tools.expand", "more"),
-	].join(theme.fg("muted", " · "));
-	if (!expanded) {
-		return [compactInstructions, theme.fg("dim", `Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`)];
-	}
-	return [
-		keyHint("app.interrupt", "to interrupt"),
-		keyHint("app.clear", "to clear"),
-		rawKeyHint(`${keyText("app.clear")} twice`, "to exit"),
-		keyHint("app.exit", "to exit (empty)"),
-		keyHint("app.suspend", "to suspend"),
-		keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
-		keyHint("app.thinking.cycle", "to cycle thinking level"),
-		rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
-		keyHint("app.model.select", "to select model"),
-		keyHint("app.tools.expand", "to expand tools"),
-		keyHint("app.thinking.toggle", "to expand thinking"),
-		keyHint("app.editor.external", "for external editor"),
-		rawKeyHint("/", "for commands"),
-		rawKeyHint("!", "to run bash"),
-		rawKeyHint("!!", "to run bash (no context)"),
-		keyHint("app.message.followUp", "to queue follow-up"),
-		keyHint("app.message.dequeue", "to edit all queued messages"),
-		keyHint("app.clipboard.pasteImage", "to paste image"),
-		rawKeyHint("drop files", "to attach"),
-	];
-}
-
-function renderHeader(report: TokenBloatReport, theme: Theme, expanded: boolean): string[] {
-	const logo = theme.bold(theme.fg("accent", "pi")) + theme.fg("dim", ` v${VERSION}`);
-	const onboarding = theme.fg("dim", "Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.");
-	return [logo, ...renderInstructionBlock(theme, expanded), "", onboarding, "", ...renderTokenBloat(report, theme)];
-}
-
-function createHeaderFactory(report: TokenBloatReport, isExpanded: () => boolean): (_tui: TUI, theme: Theme) => Component {
-	return (_tui: TUI, theme: Theme) => ({
-		render(_width: number): string[] {
-			return renderHeader(report, theme, isExpanded());
-		},
-		invalidate() {},
-	});
 }
 
 class BarList implements Component {
@@ -335,39 +258,27 @@ class BarList implements Component {
 			this.onSelectItem();
 			return;
 		}
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-			this.onCancel();
-		}
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) this.onCancel();
 	}
 
 	render(width: number): string[] {
-		if (this.items.length === 0) {
-			return [this.theme.fg("dim", "  No items")];
-		}
-
+		if (this.items.length === 0) return [this.theme.fg("dim", "  No items")];
 		const startIndex = Math.max(0, Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.items.length - this.maxVisible));
 		const endIndex = Math.min(startIndex + this.maxVisible, this.items.length);
 		const lines: string[] = [];
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.items[i]!;
-			const isSelected = i === this.selectedIndex;
-			const prefix = isSelected ? this.theme.fg("accent", "→ ") : "  ";
+			const prefix = i === this.selectedIndex ? this.theme.fg("accent", "→ ") : "  ";
 			const tokenStr = this.theme.fg("success", formatNumber(item.tokens).padStart(this.tokenWidth));
 			const barLength = Math.max(0, Math.ceil((item.tokens / this.chartMaxTokens) * this.barMaxWidth));
 			const barStr = this.theme.fg("accent", "█".repeat(barLength)) + this.theme.fg("dim", "░".repeat(this.barMaxWidth - barLength));
 			const prefixPart = prefix + tokenStr + " " + barStr + "  ";
-			const prefixVisible = 2 + this.tokenWidth + 1 + this.barMaxWidth + 2;
-			const remaining = Math.max(0, width - prefixVisible);
-			const labelStr = truncateToWidth(this.theme.fg("text", this.itemLabel(item)), remaining);
-			lines.push(prefixPart + labelStr);
+			const remaining = Math.max(0, width - (2 + this.tokenWidth + 1 + this.barMaxWidth + 2));
+			lines.push(prefixPart + truncateToWidth(this.theme.fg("text", this.itemLabel(item)), remaining));
 		}
 
-		if (this.items.length > this.maxVisible) {
-			const scrollInfo = `  (${this.selectedIndex + 1}/${this.items.length})`;
-			lines.push(this.theme.fg("dim", truncateToWidth(scrollInfo, width, "")));
-		}
-
+		if (this.items.length > this.maxVisible) lines.push(this.theme.fg("dim", truncateToWidth(`  (${this.selectedIndex + 1}/${this.items.length})`, width, "")));
 		return lines;
 	}
 
@@ -414,8 +325,6 @@ class TokenBloatModal implements Component {
 		const chart = this.currentChart();
 		const innerWidth = Math.max(1, width - 4);
 		const container = new Container();
-		const blue = (text: string) => this.theme.fg("accent", text);
-
 		container.addChild(new Text(this.renderTitle(), 1, 0));
 		container.addChild(new Text(this.renderSummary(), 1, 0));
 		container.addChild(new Text(this.renderTabs(), 1, 0));
@@ -424,22 +333,7 @@ class TokenBloatModal implements Component {
 		container.addChild(this.list);
 		container.addChild(new Text(this.renderSelectionDetail(chart), 1, 0));
 		container.addChild(new Text(this.theme.fg("dim", `↑↓ navigate · ←/→ or Tab switch chart · 1-${this.charts.length} jump · Enter/Esc close`), 1, 0));
-
-		const content = container.render(innerWidth);
-		const top = blue(`┌${"─".repeat(innerWidth)}┐`);
-		const bottom = blue(`└${"─".repeat(innerWidth)}┘`);
-		const left = blue("│ ");
-		const right = blue(" │");
-
-		const lines: string[] = [top];
-		for (const line of content) {
-			const truncated = truncateToWidth(line, innerWidth, "");
-			const vw = visibleWidth(truncated);
-			const spaces = " ".repeat(Math.max(0, innerWidth - vw));
-			lines.push(left + truncated + spaces + right);
-		}
-		lines.push(bottom);
-		return lines;
+		return frame(container.render(innerWidth), innerWidth, this.theme);
 	}
 
 	invalidate(): void {
@@ -457,10 +351,9 @@ class TokenBloatModal implements Component {
 	}
 
 	private createList(chart: BloatChart): BarList {
-		const maxTokens = chart.items[0]?.tokens ?? 1;
 		const list = new BarList(
 			chart.items,
-			maxTokens,
+			chart.items[0]?.tokens ?? 1,
 			this.theme,
 			Math.min(Math.max(chart.items.length, 1), 12),
 			(item) => chartItemLabel(chart, item),
@@ -486,10 +379,7 @@ class TokenBloatModal implements Component {
 		return this.charts
 			.map((chart, index) => {
 				const tab = `${index + 1}. ${chart.name} (${formatNumber(chart.files)}) ${formatNumber(chart.tokens)}`;
-				if (index === this.selectedChartIndex) {
-					return this.theme.bg("selectedBg", this.theme.fg("accent", ` ${this.theme.bold(tab)} `));
-				}
-				return this.theme.fg("dim", ` ${tab} `);
+				return index === this.selectedChartIndex ? this.theme.bg("selectedBg", this.theme.fg("accent", ` ${this.theme.bold(tab)} `)) : this.theme.fg("dim", ` ${tab} `);
 			})
 			.join(" ");
 	}
@@ -497,18 +387,12 @@ class TokenBloatModal implements Component {
 	private renderChartMeta(chart: BloatChart): string {
 		const percent = this.report.totalTokens > 0 ? (chart.tokens / this.report.totalTokens) * 100 : 0;
 		const labelHint = chart.kind === "all" ? "labels include resource group" : "resource labels";
-		return `${this.theme.fg("accent", chart.name)} ${this.theme.fg(
-			"dim",
-			`${formatNumber(chart.files)} resources · ${formatNumber(chart.tokens)} tokens · ${formatNumber(percent)}% of total · sorted desc · ${labelHint}`,
-		)}`;
+		return `${this.theme.fg("accent", chart.name)} ${this.theme.fg("dim", `${formatNumber(chart.files)} resources · ${formatNumber(chart.tokens)} tokens · ${formatNumber(percent)}% of total · sorted desc · ${labelHint}`)}`;
 	}
 
 	private renderSelectionDetail(chart: BloatChart): string {
 		if (!this.selectedItem) return this.theme.fg("dim", "No resource selected");
-		return `${this.theme.fg("success", `${formatNumber(this.selectedItem.tokens)} tokens`)}  ${this.theme.fg(
-			"muted",
-			chartItemLabel(chart, this.selectedItem),
-		)}  ${this.theme.fg("dim", this.selectedItem.path)}`;
+		return `${this.theme.fg("success", `${formatNumber(this.selectedItem.tokens)} tokens`)}  ${this.theme.fg("muted", chartItemLabel(chart, this.selectedItem))}  ${this.theme.fg("dim", this.selectedItem.path)}`;
 	}
 }
 
@@ -534,137 +418,120 @@ class TokenBloatSettingsModal implements Component {
 			this.done({ showSummaryOnOnboarding: this.showSummaryOnOnboarding });
 			return;
 		}
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-			this.done(undefined);
-		}
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) this.done(undefined);
 	}
 
 	render(width: number): string[] {
 		const innerWidth = Math.max(1, width - 4);
-		const blue = (text: string) => this.theme.fg("accent", text);
 		const enabledText = this.showSummaryOnOnboarding ? this.theme.fg("success", "Enabled") : this.theme.fg("muted", "Disabled");
-		const lines = [
-			`${this.theme.fg("accent", this.theme.bold("TokenBloat settings"))}`,
-			this.theme.fg("dim", "Configure how TokenBloat appears when Pi starts."),
-			"",
-			`${this.theme.fg("text", "Startup summary")}  ${enabledText}`,
-			this.theme.fg("dim", "Show the TokenBloat summary in the onboarding header."),
-			"",
-			this.theme.fg("dim", "←/→ or Space toggle · Enter save · Esc cancel"),
-		];
-		const top = blue(`┌${"─".repeat(innerWidth)}┐`);
-		const bottom = blue(`└${"─".repeat(innerWidth)}┘`);
-		const left = blue("│ ");
-		const right = blue(" │");
-		return [
-			top,
-			...lines.map((line) => {
-				const truncated = truncateToWidth(line, innerWidth, "");
-				const spaces = " ".repeat(Math.max(0, innerWidth - visibleWidth(truncated)));
-				return left + truncated + spaces + right;
-			}),
-			bottom,
-		];
+		return frame(
+			[
+				this.theme.fg("accent", this.theme.bold("TokenBloat settings")),
+				this.theme.fg("dim", "Configure how TokenBloat appears when Pi starts."),
+				"",
+				`${this.theme.fg("text", "Startup summary")}  ${enabledText}`,
+				this.theme.fg("dim", "Show the TokenBloat summary on startup and reload."),
+				"",
+				this.theme.fg("dim", "←/→ or Space toggle · Enter save · Esc cancel"),
+			],
+			innerWidth,
+			this.theme,
+		);
 	}
 
 	invalidate(): void {}
 }
 
-async function showTokenBloatModal(ctx: { ui: { custom: <T>(factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component, options?: unknown) => Promise<T> } }, report: TokenBloatReport): Promise<void> {
-	await ctx.ui.custom<void>(
-		(tui, theme, _keybindings, done) => new TokenBloatModal(tui, report, theme, done),
-		{
-			overlay: true,
-			overlayOptions: {
-				width: "90%",
-				minWidth: 70,
-				maxHeight: "80%",
-				anchor: "center",
-			},
-		},
-	);
+function frame(content: string[], innerWidth: number, theme: Theme): string[] {
+	const blue = (text: string) => theme.fg("accent", text);
+	const lines = [blue(`┌${"─".repeat(innerWidth)}┐`)];
+	for (const line of content) {
+		const truncated = truncateToWidth(line, innerWidth, "");
+		const spaces = " ".repeat(Math.max(0, innerWidth - visibleWidth(truncated)));
+		lines.push(blue("│ ") + truncated + spaces + blue(" │"));
+	}
+	lines.push(blue(`└${"─".repeat(innerWidth)}┘`));
+	return lines;
 }
 
-async function showTokenBloatSettingsModal(
-	ctx: { ui: { custom: <T>(factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component, options?: unknown) => Promise<T> } },
-	config: TokenBloatConfig,
-): Promise<TokenBloatConfig | undefined> {
-	return ctx.ui.custom<TokenBloatConfig | undefined>(
-		(tui, theme, _keybindings, done) => new TokenBloatSettingsModal(tui, theme, config, done),
-		{
-			overlay: true,
-			overlayOptions: {
-				width: "70%",
-				minWidth: 58,
-				maxHeight: "60%",
-				anchor: "center",
-			},
+async function showTokenBloatModal(ctx: CustomUiContext, report: TokenBloatReport): Promise<void> {
+	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => new TokenBloatModal(tui, report, theme, done), {
+		overlay: true,
+		overlayOptions: {
+			width: "90%",
+			minWidth: 70,
+			maxHeight: "80%",
+			anchor: "center",
 		},
-	);
+	});
+}
+
+async function showTokenBloatSettingsModal(ctx: CustomUiContext, config: TokenBloatConfig): Promise<TokenBloatConfig | undefined> {
+	return ctx.ui.custom<TokenBloatConfig | undefined>((tui, theme, _keybindings, done) => new TokenBloatSettingsModal(tui, theme, config, done), {
+		overlay: true,
+		overlayOptions: {
+			width: "70%",
+			minWidth: 58,
+			maxHeight: "60%",
+			anchor: "center",
+		},
+	});
 }
 
 export default function (pi: ExtensionAPI) {
-	let reloadSummaryTimer: ReturnType<typeof setTimeout> | undefined;
+	let summaryTimer: ReturnType<typeof setTimeout> | undefined;
+	let cachedReport: TokenBloatReport | undefined;
 
-	function clearReloadSummary(ctx: { ui: { setWidget: (key: string, content: string[] | undefined, options?: unknown) => void } }): void {
-		if (reloadSummaryTimer) clearTimeout(reloadSummaryTimer);
-		reloadSummaryTimer = undefined;
-		ctx.ui.setWidget(RELOAD_SUMMARY_WIDGET_KEY, undefined);
+	function clearSummary(ctx: { ui: { setWidget: (key: string, content: string[] | undefined, options?: unknown) => void } }): void {
+		if (summaryTimer) clearTimeout(summaryTimer);
+		summaryTimer = undefined;
+		ctx.ui.setWidget(SUMMARY_WIDGET_KEY, undefined);
 	}
 
-	function showReloadSummary(ctx: { ui: { setWidget: (key: string, content: string[] | undefined, options?: unknown) => void; theme: Theme } }, report: TokenBloatReport): void {
-		if (reloadSummaryTimer) clearTimeout(reloadSummaryTimer);
-		ctx.ui.setWidget(RELOAD_SUMMARY_WIDGET_KEY, renderTokenBloat(report, ctx.ui.theme), { placement: "aboveEditor" });
-		reloadSummaryTimer = setTimeout(() => {
-			ctx.ui.setWidget(RELOAD_SUMMARY_WIDGET_KEY, undefined);
-			reloadSummaryTimer = undefined;
-		}, RELOAD_SUMMARY_VISIBLE_MS);
+	function showSummary(ctx: { ui: { setWidget: (key: string, content: string[] | undefined, options?: unknown) => void; theme: Theme } }, report: TokenBloatReport): void {
+		if (summaryTimer) clearTimeout(summaryTimer);
+		ctx.ui.setWidget(SUMMARY_WIDGET_KEY, renderTokenBloat(report, ctx.ui.theme), { placement: "aboveEditor" });
+		summaryTimer = setTimeout(() => {
+			ctx.ui.setWidget(SUMMARY_WIDGET_KEY, undefined);
+			summaryTimer = undefined;
+		}, SUMMARY_VISIBLE_MS);
 	}
 
-	async function refreshTokenBloat(
-		ctx: {
-			cwd: string;
-			ui: { setHeader: (factory: ((_tui: TUI, theme: Theme) => Component) | undefined) => void; getToolsExpanded: () => boolean; theme: Theme };
-		},
-		config: TokenBloatConfig,
-	): Promise<TokenBloatReport> {
-		const report = await collectTokenBloat(ctx.cwd);
-		ctx.ui.setHeader(config.showSummaryOnOnboarding ? createHeaderFactory(report, ctx.ui.getToolsExpanded) : undefined);
-		return report;
+	async function loadReport(cwd: string): Promise<TokenBloatReport> {
+		cachedReport = await collectTokenBloat(cwd);
+		return cachedReport;
 	}
 
 	pi.on("session_start", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 		const config = readTokenBloatConfig();
 		if (!config.showSummaryOnOnboarding) {
-			ctx.ui.setHeader(undefined);
-			clearReloadSummary(ctx);
+			clearSummary(ctx);
 			return;
 		}
-		const report = await refreshTokenBloat(ctx, config);
-		if (event.reason === "reload") showReloadSummary(ctx, report);
+		const report = await loadReport(ctx.cwd);
+		if (event.reason === "startup" || event.reason === "reload") showSummary(ctx, report);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		clearReloadSummary(ctx);
+		clearSummary(ctx);
 	});
 
 	pi.registerCommand("token-bloat", {
-		description: "Open startup token footprint details for skills, prompts, and extensions",
+		description: "Show startup token footprint",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("/token-bloat requires interactive mode", "error");
 				return;
 			}
-			const config = readTokenBloatConfig();
-			const report = await refreshTokenBloat(ctx, config);
+			const report = cachedReport ?? (await loadReport(ctx.cwd));
 			await showTokenBloatModal(ctx, report);
 		},
 	});
 
 	pi.registerCommand("token-bloat:settings", {
-		description: "Configure TokenBloat startup summary visibility",
+		description: "Configure TokenBloat",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("/token-bloat:settings requires interactive mode", "error");
@@ -674,11 +541,8 @@ export default function (pi: ExtensionAPI) {
 			const nextConfig = await showTokenBloatSettingsModal(ctx, currentConfig);
 			if (!nextConfig) return;
 			writeTokenBloatConfig(nextConfig);
-			if (nextConfig.showSummaryOnOnboarding) {
-				await refreshTokenBloat(ctx, nextConfig);
-			} else {
-				ctx.ui.setHeader(undefined);
-			}
+			if (nextConfig.showSummaryOnOnboarding) showSummary(ctx, cachedReport ?? (await loadReport(ctx.cwd)));
+			else clearSummary(ctx);
 			ctx.ui.notify(`TokenBloat startup summary ${nextConfig.showSummaryOnOnboarding ? "enabled" : "disabled"}`, "info");
 		},
 	});

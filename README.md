@@ -2,13 +2,13 @@
 
 TokenBloat is a Pi extension that shows the startup token footprint for loaded skills, prompts, and extensions.
 
-Pi can load many resources before the first user message. TokenBloat makes that cost visible in the header and gives you an interactive chart for finding the largest resources.
+Pi can load many resources before the first user message. TokenBloat makes that cost visible above the editor and gives you an interactive chart for finding the largest resources.
 
 ![TokenBloat demo](assets/token-bloat-demo.gif)
 
 ## Features
 
-- Adds a compact startup summary to the Pi header.
+- Adds a compact startup summary above the editor.
 - Shows total tokens and files by resource group.
 - Provides `/token-bloat` for an interactive chart.
 - Defaults to an `All` chart across skills, prompts, and extensions.
@@ -36,7 +36,7 @@ pi -e git:github.com/ocodista/pi-token-bloat
 
 ## Use
 
-Start Pi after installing the package. TokenBloat updates the startup header automatically. After `/reload`, it briefly shows the summary above the editor.
+Start Pi after installing the package. TokenBloat briefly shows the startup summary above the editor. After `/reload`, it shows the summary again.
 
 Open the detailed view:
 
