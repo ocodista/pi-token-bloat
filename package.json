@@ -1,6 +1,6 @@
 {
 	"name": "@ocodista/pi-token-bloat",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Pi extension that shows startup token footprint by resource.",
 	"type": "module",
 	"license": "MIT",
